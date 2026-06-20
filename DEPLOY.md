@@ -57,6 +57,25 @@ localStorage and sent per request. So:
 ("Sign in to confirm you're not a bot" / HTTP 429). If transcripts fail after deploy
 with "couldn't get a transcript … the request was blocked", that's why — not your code.
 
+### ✅ Free fix — Supadata transcript fallback (recommended)
+
+The app falls back to the **Supadata** API, which fetches the transcript via its own
+infrastructure, so it works even though Render's IP is blocked. Free tier ~**100
+transcripts/month, no credit card**.
+
+1. Sign up at **supadata.ai** → copy your API key (Dashboard).
+2. In Render → your service → **Environment** → add:
+   ```
+   SUPADATA_API_KEY = <your supadata key>
+   ```
+3. Save — Render redeploys. Transcripts now work, $0.
+
+The transcript chain is: direct youtube-transcript-api → yt-dlp → Supadata. So locally it
+uses the direct path (free, unlimited) and only spends a Supadata credit when the direct
+path is blocked (i.e. on the cloud host). Leave the key unset locally.
+
+### Alternative — residential proxy
+
 The app routes through a proxy when these env vars are set. **Residential** proxies work;
 datacenter proxies (incl. free tiers) are blocked too.
 

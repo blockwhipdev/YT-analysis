@@ -17,7 +17,16 @@ import json
 import html
 import time
 import hmac
+import ssl
 import hashlib
+import urllib.parse
+import urllib.request
+
+try:  # use the bundled CA store so HTTPS works regardless of system certs
+    import certifi
+    _SSL_CTX = ssl.create_default_context(cafile=certifi.where())
+except Exception:
+    _SSL_CTX = None
 
 from flask import (
     Flask, request, jsonify, send_from_directory, session, redirect, Response,
@@ -73,6 +82,11 @@ def _build_proxy():
 
 
 TRANSCRIPT_PROXY, YDLP_PROXY = _build_proxy()
+
+# Free fallback for hosts where YouTube blocks the server IP: Supadata fetches
+# the transcript via its own infrastructure. Free tier ~100/month, no card.
+# Get a key at supadata.ai and set SUPADATA_API_KEY in the environment.
+SUPADATA_API_KEY = os.environ.get("SUPADATA_API_KEY", "").strip()
 
 # ----------------------------- URL handling ------------------------------- #
 
@@ -155,8 +169,10 @@ def get_video_meta(url_or_id: str):
 
 
 def get_transcript(video_id: str) -> str:
-    """Primary: youtube-transcript-api. Fallback: yt-dlp auto subtitles."""
-    # Primary
+    """Tries in order: youtube-transcript-api, yt-dlp subs, then Supadata.
+    Supadata fetches via its own infrastructure, so it works even when YouTube
+    blocks this server's IP — the free fallback for cloud hosts."""
+    # 1. youtube-transcript-api (direct; uses proxy if configured)
     try:
         api = YouTubeTranscriptApi(proxy_config=TRANSCRIPT_PROXY)
         data = api.fetch(video_id, languages=["en", "en-US", "en-GB"]).to_raw_data()
@@ -166,18 +182,52 @@ def get_transcript(video_id: str) -> str:
     except Exception:
         pass
 
-    # Fallback: yt-dlp writes a VTT we parse in-memory
+    # 2. yt-dlp auto subtitles (parsed in-memory)
     try:
         return _yt_dlp_subs(video_id)
-    except Exception as e:
-        hint = "" if (TRANSCRIPT_PROXY or YDLP_PROXY) else (
-            " On a hosted server this usually means YouTube is blocking the server's IP — "
-            "set a residential proxy (see DEPLOY.md)."
+    except Exception:
+        pass
+
+    # 3. Supadata API fallback (works from blocked datacenter IPs)
+    last = None
+    if SUPADATA_API_KEY:
+        try:
+            return _supadata_transcript(video_id)
+        except Exception as e:
+            last = e
+
+    hint = "" if (TRANSCRIPT_PROXY or YDLP_PROXY or SUPADATA_API_KEY) else (
+        " On a hosted server this usually means YouTube is blocking the server's IP — "
+        "set SUPADATA_API_KEY (free) or a residential proxy (see DEPLOY.md)."
+    )
+    detail = f" ({type(last).__name__})" if last else ""
+    raise RuntimeError(
+        "Couldn't get a transcript for this video — captions may be disabled, "
+        f"or the request was blocked.{hint}{detail}"
+    )
+
+
+def _supadata_transcript(video_id: str) -> str:
+    """Fetch a transcript through Supadata's API (free tier ~100/month)."""
+    qs = urllib.parse.urlencode({
+        "url": f"https://www.youtube.com/watch?v={video_id}",
+        "text": "true",  # ask for plain text
+    })
+    req = urllib.request.Request(
+        f"https://api.supadata.ai/v1/transcript?{qs}",
+        headers={"x-api-key": SUPADATA_API_KEY},
+    )
+    with urllib.request.urlopen(req, timeout=90, context=_SSL_CTX) as r:
+        payload = json.loads(r.read().decode("utf-8"))
+
+    content = payload.get("content")
+    if isinstance(content, list):  # segmented form: join segment texts
+        content = " ".join(
+            seg.get("text", "") for seg in content if isinstance(seg, dict)
         )
-        raise RuntimeError(
-            "Couldn't get a transcript for this video — captions may be disabled, "
-            f"or the request was blocked.{hint} ({type(e).__name__})"
-        )
+    if not content or not str(content).strip():
+        raise RuntimeError("supadata returned no transcript")
+    return clean_transcript(str(content))
 
 
 def _yt_dlp_subs(video_id: str) -> str:
