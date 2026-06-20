@@ -18,6 +18,27 @@ default 30s timeout would kill the request mid-flight.
 
 ---
 
+## Activity logging + /admin dashboard (optional)
+
+Set `DATABASE_URL` (Postgres, e.g. Neon) and the app records every analysed video and
+its full generated briefing. View them at **`/admin`** (password = `ADMIN_PASSWORD`).
+
+Env vars:
+```
+DATABASE_URL   = postgresql://user:pass@host/db?sslmode=require   # enables logging + /admin
+ADMIN_PASSWORD = your-admin-password                              # gate for /admin (default: noise@123 — change it)
+SECRET_KEY     = any long random string                          # optional; signs the admin session
+```
+
+Notes:
+- **Logging never blocks or slows users.** Writes go to a background queue; if the DB is
+  slow or down, items are dropped and the request is unaffected. The app runs fine with
+  `DATABASE_URL` unset (logging just no-ops).
+- **No API keys are stored** — only a one-way hash, so the admin can count distinct users
+  without ever seeing a key.
+- **Change `ADMIN_PASSWORD`** from the default before sharing the link, and treat
+  `DATABASE_URL` as a secret (env only — never commit it).
+
 ## The API-key model (read this)
 
 Every visitor enters **their own** Anthropic key in the browser; it's stored in their
@@ -30,12 +51,32 @@ localStorage and sent per request. So:
 
 ---
 
-## ⚠️ The one real risk: YouTube blocks datacenter IPs
+## ⚠️ YouTube blocks datacenter IPs — fix with a residential proxy
 
-`yt-dlp` / the transcript API work from a home IP but are frequently blocked from cloud
-hosts ("Sign in to confirm you're not a bot" / HTTP 429). If transcripts fail after
-deploy, that's why — it's not your code. Mitigations: a residential/rotating proxy, or
-run via a tunnel from a home machine instead (see the project chat).
+`yt-dlp` / the transcript API work from a home IP but are blocked from cloud hosts
+("Sign in to confirm you're not a bot" / HTTP 429). If transcripts fail after deploy
+with "couldn't get a transcript … the request was blocked", that's why — not your code.
+
+The app routes through a proxy when these env vars are set. **Residential** proxies work;
+datacenter proxies (incl. free tiers) are blocked too.
+
+**Recommended — Webshare residential** (cheap, pay-per-GB; transcripts are tiny):
+1. Sign up at webshare.io → buy a **Residential** plan → copy the proxy username/password.
+2. In Render → your service → **Environment** → add:
+   ```
+   WEBSHARE_PROXY_USERNAME = <your webshare username>
+   WEBSHARE_PROXY_PASSWORD = <your webshare password>
+   ```
+3. Save — Render redeploys. Done.
+
+**Any other proxy** — set a single var instead:
+```
+PROXY_URL = http://user:pass@host:port
+```
+
+With either set, the transcript API and all `yt-dlp` calls (transcript fallback, channel
+listing, video metadata) go through the proxy automatically. Leave them unset locally —
+the app runs proxy-free from your home IP.
 
 ---
 
